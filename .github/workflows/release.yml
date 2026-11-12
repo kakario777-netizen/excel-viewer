@@ -1,0 +1,33 @@
+name: release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read version
+        id: v
+        run: echo "ver=$(grep -oP 'Version = "\K[0-9.]+' ExcelViewer.cs | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Skip if released
+        id: chk
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.v.outputs.ver }}" >/dev/null 2>&1; then echo "skip=1" >> "$GITHUB_OUTPUT"; fi
+      - name: Build
+        if: steps.chk.outputs.skip != '1'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q mono-mcs mono-devel zip
+          mcs -target:winexe -sdk:4.5 -optimize+ -out:ExcelViewer.exe -win32icon:icon.ico -r:System.Windows.Forms.dll -r:System.Drawing.dll -r:System.IO.Compression.dll -r:System.Xml.dll ExcelViewer.cs
+          zip ExcelViewer.zip ExcelViewer.exe
+      - name: Release
+        if: steps.chk.outputs.skip != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.v.outputs.ver }}" ExcelViewer.exe ExcelViewer.zip --title "엑셀 뷰어 v${{ steps.v.outputs.ver }}" --notes "압축(zip)을 받아 풀고 ExcelViewer.exe를 실행하세요. 이미 쓰고 있다면 프로그램 오른쪽 위 [업데이트 확인]으로 자동 업데이트됩니다."
