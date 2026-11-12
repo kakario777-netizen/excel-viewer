@@ -17,14 +17,14 @@ using System.Xml;
 
 [assembly: System.Reflection.AssemblyTitle("엑셀 뷰어")]
 [assembly: System.Reflection.AssemblyProduct("엑셀 뷰어")]
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.1.0")]
 
 namespace ExcelViewer
 {
     static class AppInfo
     {
-        public const string Version = "1.2.0";
+        public const string Version = "1.2.1";
         public const string Repo = "kakario777-netizen/excel-viewer";
         public static readonly Color Accent = Color.FromArgb(33, 115, 70);
     }
@@ -2487,7 +2487,7 @@ namespace ExcelViewer
                 {
                     var obj = new DataObject();
                     obj.SetText(view.SelectionText(), TextDataFormat.UnicodeText);
-                    obj.SetData(DataFormats.Html, HtmlClip(view.SelectionHtml()));
+                    obj.SetData(DataFormats.Html, new MemoryStream(Encoding.UTF8.GetBytes(HtmlClip(view.SelectionHtml()))));
                     Clipboard.SetDataObject(obj, true);
                     Flash("표 모양 그대로 복사했어요.");
                 }
