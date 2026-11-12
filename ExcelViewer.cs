@@ -17,14 +17,14 @@ using System.Xml;
 
 [assembly: System.Reflection.AssemblyTitle("엑셀 뷰어")]
 [assembly: System.Reflection.AssemblyProduct("엑셀 뷰어")]
-[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
 
 namespace ExcelViewer
 {
     static class AppInfo
     {
-        public const string Version = "1.1.0";
+        public const string Version = "1.2.0";
         public const string Repo = "kakario777-netizen/excel-viewer";
         public static readonly Color Accent = Color.FromArgb(33, 115, 70);
     }
@@ -69,6 +69,17 @@ namespace ExcelViewer
         // 레이아웃 (96dpi 픽셀)
         public float[] X, Y, CW, RH;
         public List<long> TextOrder;
+        public string EntryName;
+        public int Mdw = 8;
+        public Dictionary<int, float> EditCols = new Dictionary<int, float>(), EditRows = new Dictionary<int, float>();
+        public Dictionary<long, string> EditCells = new Dictionary<long, string>();
+        public bool Dirty { get { return EditCols.Count + EditRows.Count + EditCells.Count > 0; } }
+        public void Recalc()
+        {
+            X = new float[Cols + 1]; Y = new float[Rows + 1];
+            for (int c = 0; c < Cols; c++) X[c + 1] = X[c] + CW[c];
+            for (int r = 0; r < Rows; r++) Y[r + 1] = Y[r] + RH[r];
+        }
 
         public static long Key(int r, int c) { return ((long)r << 16) | (uint)c; }
         public Cell Get(int r, int c) { Cell x; return Cells.TryGetValue(Key(r, c), out x) ? x : null; }
@@ -142,7 +153,7 @@ namespace ExcelViewer
                     target = target.StartsWith("/") ? target.Substring(1) : "xl/" + target;
                     var entry = FindEntry(zip, target);
                     if (entry == null) continue;
-                    var sh = new Sheet { Name = s.GetAttribute("name"), Styles = styles };
+                    var sh = new Sheet { Name = s.GetAttribute("name"), Styles = styles, EntryName = entry.FullName };
                     ReadSheet(entry, sh, shared);
                     result.Add(sh);
                 }
@@ -728,13 +739,18 @@ namespace ExcelViewer
         public static void Layout(Sheet s)
         {
             var defFont = Fonts.For(s.Styles[0], 1f);
-            int mdw = 7;
-            try
+            string dn = s.Styles[0].FontName ?? "";
+            float dsz = s.Styles[0].FontSize;
+            int mdw;
+            if ((dn == "맑은 고딕" || dn.Equals("Malgun Gothic", StringComparison.OrdinalIgnoreCase)) && Math.Abs(dsz - 11) < 0.1) mdw = 8;
+            else if ((dn == "Calibri" || dn == "Arial") && Math.Abs(dsz - 11) < 0.1) mdw = 7;
+            else if (dn == "돋움" || dn == "굴림" || dn.Equals("Dotum", StringComparison.OrdinalIgnoreCase) || dn.Equals("Gulim", StringComparison.OrdinalIgnoreCase)) mdw = dsz <= 10 ? 7 : 8;
+            else
             {
-                for (char ch = '0'; ch <= '9'; ch++)
-                    mdw = Math.Max(mdw, TextRenderer.MeasureText(ch.ToString(), defFont, Size.Empty, TextFormatFlags.NoPadding).Width);
+                mdw = 7;
+                try { using (var bmp = new Bitmap(1, 1)) using (var g = Graphics.FromImage(bmp)) mdw = Math.Max(5, (int)Math.Round(g.MeasureString("0000000000", defFont, 1000, StringFormat.GenericTypographic).Width / 10)); } catch { }
             }
-            catch { }
+            s.Mdw = mdw;
             Func<double, float> chars2px = w => (float)Math.Truncate(((256 * w + Math.Truncate(128.0 / mdw)) / 256) * mdw);
             float defCol;
             if (s.DefColWidthChars > 0) defCol = chars2px(s.DefColWidthChars);
@@ -774,28 +790,28 @@ namespace ExcelViewer
                     if (st.Wrap)
                     {
                         int w = Math.Max(4, (int)s.CW[c] - 6 - st.Indent * 9);
-                        need = TextRenderer.MeasureText(cell.Text, font, new Size(w, int.MaxValue), flags).Height + 5;
+                        need = TextRenderer.MeasureText(cell.Text, font, new Size(w, int.MaxValue), flags).Height + 3;
                     }
-                    else need = font.Height + 4;
-                    if (need > s.RH[r] && (!s.CustomHt.Contains(r) || st.Wrap)) s.RH[r] = need;
+                    else need = font.Height + 2;
+                    if (need > s.RH[r] && !s.RowHt.ContainsKey(r)) s.RH[r] = need;
                 }
                 else
                 {
                     float w = 0, h = 0;
                     for (int cc = m.C1; cc <= m.C2 && cc < s.Cols; cc++) w += s.CW[cc];
                     int last = -1;
-                    for (int rr = m.R1; rr <= m.R2 && rr < s.Rows; rr++) { h += s.RH[rr]; if (s.RH[rr] > 0) last = rr; }
-                    if (last < 0) continue;
+                    bool stored = false;
+                    for (int rr = m.R1; rr <= m.R2 && rr < s.Rows; rr++) { h += s.RH[rr]; if (s.RH[rr] > 0) last = rr; if (s.RowHt.ContainsKey(rr)) stored = true; }
+                    if (last < 0 || stored) continue;
                     float need;
-                    if (st.Wrap) need = TextRenderer.MeasureText(cell.Text, font, new Size(Math.Max(4, (int)w - 6), int.MaxValue), flags).Height + 5;
-                    else need = font.Height + 4;
+                    if (st.Wrap) need = TextRenderer.MeasureText(cell.Text, font, new Size(Math.Max(4, (int)w - 6), int.MaxValue), flags).Height + 3;
+                    else need = font.Height + 2;
                     if (need > h) s.RH[last] += need - h;
                 }
             }
-            s.X = new float[s.Cols + 1];
-            s.Y = new float[s.Rows + 1];
-            for (int c = 0; c < s.Cols; c++) s.X[c + 1] = s.X[c] + s.CW[c];
-            for (int r = 0; r < s.Rows; r++) s.Y[r + 1] = s.Y[r] + s.RH[r];
+            foreach (var kv in s.EditCols) if (kv.Key < s.Cols) s.CW[kv.Key] = kv.Value;
+            foreach (var kv in s.EditRows) if (kv.Key < s.Rows) s.RH[kv.Key] = kv.Value;
+            s.Recalc();
             var order = new List<long>();
             foreach (var kv in s.Cells) if (!string.IsNullOrEmpty(kv.Value.Text)) order.Add(kv.Key);
             order.Sort();
@@ -995,7 +1011,20 @@ namespace ExcelViewer
         int dragMode; // 0 셀, 1 열, 2 행
         public event EventHandler SelectionChanged;
         public event EventHandler ZoomChanged;
+        public event EventHandler Edited;
         Font headerFont;
+        bool editMode;
+        int resizeCol = -1, resizeRow = -1, resizeStart; float resizeOrig;
+        TextBox editor;
+        int edR = -1, edC = -1;
+
+        public bool EditMode
+        {
+            get { return editMode; }
+            set { CommitEdit(); editMode = value; Cursor = Cursors.Default; Invalidate(); }
+        }
+
+        void RaiseEdited() { if (Edited != null) Edited(this, EventArgs.Empty); }
 
         public SheetView()
         {
@@ -1003,11 +1032,11 @@ namespace ExcelViewer
             TabStop = true;
             BackColor = Color.White;
             Controls.Add(vs); Controls.Add(hs);
-            vs.Scroll += (s, e) => Invalidate();
-            hs.Scroll += (s, e) => Invalidate();
+            vs.Scroll += (s, e) => { CommitEdit(); Invalidate(); };
+            hs.Scroll += (s, e) => { CommitEdit(); Invalidate(); };
             vs.ValueChanged += (s, e) => Invalidate();
             hs.ValueChanged += (s, e) => Invalidate();
-            using (var g = CreateGraphics()) dpi = g.DpiX / 96f;
+            dpi = Program.Dpi;
             headerFont = new Font("맑은 고딕", 12f * dpi, GraphicsUnit.Pixel);
         }
 
@@ -1019,6 +1048,7 @@ namespace ExcelViewer
 
         public void SetSheet(Sheet s)
         {
+            CancelEdit();
             Sheet = s;
             ar = ac = cr = cc = -1;
             vs.Value = 0; hs.Value = 0;
@@ -1074,6 +1104,7 @@ namespace ExcelViewer
         }
 
         public bool HasSelection { get { return ar >= 0; } }
+        public bool IsEditing { get { return editor != null; } }
 
         public void GetSel(out int r1, out int c1, out int r2, out int c2)
         {
@@ -1123,6 +1154,17 @@ namespace ExcelViewer
 
         protected override void OnPaint(PaintEventArgs e)
         {
+            try { PaintAll(e); }
+            catch (Exception ex)
+            {
+                e.Graphics.ResetClip();
+                TextRenderer.DrawText(e.Graphics, "화면 그리기 오류: " + ex.Message, Font, new Point(10, 40), Color.Red);
+                Console.Error.WriteLine(ex);
+            }
+        }
+
+        void PaintAll(PaintEventArgs e)
+        {
             var g = e.Graphics;
             g.Clear(Color.White);
             if (Sheet == null || Sheet.X == null) return;
@@ -1146,7 +1188,7 @@ namespace ExcelViewer
             }
             g.ResetClip();
             // 머리글
-            var hb = Color.FromArgb(243, 244, 246);
+            var hb = editMode ? Color.FromArgb(255, 243, 214) : Color.FromArgb(243, 244, 246);
             var hsel = Color.FromArgb(211, 230, 218);
             using (var bg = new SolidBrush(hb)) { g.FillRectangle(bg, 0, 0, ClientSize.Width - vs.Width, hh); g.FillRectangle(bg, 0, 0, hw, ClientSize.Height - hs.Height); }
             using (var line = new Pen(Color.FromArgb(210, 212, 216)))
@@ -1196,10 +1238,18 @@ namespace ExcelViewer
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            CommitEdit();
             Focus();
             if (e.Button != MouseButtons.Left) return;
+            if (editMode && Sheet != null)
+            {
+                int bc = ColBorderAt(e.Location), br = RowBorderAt(e.Location);
+                if (bc >= 0) { resizeCol = bc; resizeStart = e.X; resizeOrig = Sheet.CW[bc]; Capture = true; return; }
+                if (br >= 0) { resizeRow = br; resizeStart = e.Y; resizeOrig = Sheet.RH[br]; Capture = true; return; }
+            }
             int r, c, zone;
             if (!Hit(e.Location, out r, out c, out zone)) return;
+            if (editMode && zone == 0 && e.Clicks == 2) { BeginEdit(r, c); return; }
             if (zone == 3) { SelectAll(); return; }
             bool shift = (ModifierKeys & Keys.Shift) != 0 && HasSelection;
             dragMode = zone;
@@ -1215,6 +1265,15 @@ namespace ExcelViewer
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            if (resizeCol >= 0 || resizeRow >= 0)
+            {
+                if (resizeCol >= 0) Sheet.CW[resizeCol] = Math.Max(6, resizeOrig + (e.X - resizeStart) / Z);
+                else Sheet.RH[resizeRow] = Math.Max(6, resizeOrig + (e.Y - resizeStart) / Z);
+                Sheet.Recalc(); UpdateBars(); Invalidate();
+                return;
+            }
+            if (editMode && !dragging && Sheet != null)
+                Cursor = ColBorderAt(e.Location) >= 0 ? Cursors.SizeWE : RowBorderAt(e.Location) >= 0 ? Cursors.SizeNS : Cursors.Default;
             if (!dragging) return;
             var p = e.Location;
             int step = (int)(25 * dpi);
@@ -1233,7 +1292,128 @@ namespace ExcelViewer
             if (SelectionChanged != null) SelectionChanged(this, EventArgs.Empty);
         }
 
-        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); dragging = false; Capture = false; }
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (resizeCol >= 0) { Sheet.EditCols[resizeCol] = (float)Math.Round(Sheet.CW[resizeCol]); Sheet.CW[resizeCol] = Sheet.EditCols[resizeCol]; Sheet.Recalc(); RaiseEdited(); }
+            if (resizeRow >= 0) { Sheet.EditRows[resizeRow] = (float)Math.Round(Sheet.RH[resizeRow]); Sheet.RH[resizeRow] = Sheet.EditRows[resizeRow]; Sheet.Recalc(); RaiseEdited(); }
+            resizeCol = resizeRow = -1;
+            dragging = false; Capture = false;
+            Invalidate();
+        }
+
+        int ColBorderAt(Point p)
+        {
+            if (p.Y >= HH || p.X < HW) return -1;
+            float z = Z; int tol = (int)(4 * dpi);
+            for (int c = Render.Find(Sheet.X, Math.Max(0, (p.X - HW + hs.Value) / z) ) + 1; c >= 1 && c <= Sheet.Cols; c--)
+            {
+                int x = (int)Math.Round(HW - hs.Value + Sheet.X[c] * z);
+                if (Math.Abs(p.X - x) <= tol) { int k = c - 1; while (k > 0 && Sheet.CW[k] == 0) k--; return k; }
+                if (x < p.X - tol) break;
+            }
+            return -1;
+        }
+
+        int RowBorderAt(Point p)
+        {
+            if (p.X >= HW || p.Y < HH) return -1;
+            float z = Z; int tol = (int)(3 * dpi);
+            for (int r = Render.Find(Sheet.Y, Math.Max(0, (p.Y - HH + vs.Value) / z)) + 1; r >= 1 && r <= Sheet.Rows; r--)
+            {
+                int y = (int)Math.Round(HH - vs.Value + Sheet.Y[r] * z);
+                if (Math.Abs(p.Y - y) <= tol) { int k = r - 1; while (k > 0 && Sheet.RH[k] == 0) k--; return k; }
+                if (y < p.Y - tol) break;
+            }
+            return -1;
+        }
+
+        // ── 글자 수정 ──
+        public void BeginEdit(int r, int c)
+        {
+            if (Sheet == null) return;
+            CommitEdit();
+            var m = Sheet.MergeAt(r, c);
+            if (m != null) { r = m.R1; c = m.C1; }
+            ar = cr = r; ac = cc = c;
+            EnsureVisible(r, c);
+            int r2 = m != null ? Math.Min(m.R2, Sheet.Rows - 1) : r, c2 = m != null ? Math.Min(m.C2, Sheet.Cols - 1) : c;
+            float z = Z;
+            int x1 = (int)Math.Round(HW - hs.Value + Sheet.X[c] * z), x2 = (int)Math.Round(HW - hs.Value + Sheet.X[c2 + 1] * z);
+            int y1 = (int)Math.Round(HH - vs.Value + Sheet.Y[r] * z), y2 = (int)Math.Round(HH - vs.Value + Sheet.Y[r2 + 1] * z);
+            var cell = Sheet.Get(r, c);
+            var st = Sheet.StyleOf(cell);
+            editor = new TextBox
+            {
+                Multiline = true, AcceptsTab = false, BorderStyle = BorderStyle.FixedSingle, WordWrap = true,
+                Font = Fonts.For(st, z), Text = cell == null ? "" : (cell.Text ?? "").Replace("\n", "\r\n"),
+                Bounds = new Rectangle(x1, y1, Math.Max(x2 - x1 + 1, (int)(80 * dpi)), Math.Max(y2 - y1 + 1, (int)(26 * dpi)))
+            };
+            edR = r; edC = c;
+            editor.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Enter && e.Alt) { int p = editor.SelectionStart; editor.Text = editor.Text.Insert(p, "\r\n"); editor.SelectionStart = p + 2; e.SuppressKeyPress = true; }
+                else if (e.KeyCode == Keys.Enter && !e.Shift) { CommitEdit(); Focus(); e.SuppressKeyPress = true; }
+                else if (e.KeyCode == Keys.Escape) { CancelEdit(); Focus(); e.SuppressKeyPress = true; }
+            };
+            editor.TextChanged += (s, e) =>
+            {
+                int need = TextRenderer.MeasureText(editor.Text + "\n", editor.Font, new Size(editor.Width - 6, int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl).Height + 6;
+                if (need > editor.Height) editor.Height = Math.Min(need, ClientSize.Height - editor.Top - hs.Height);
+            };
+            editor.LostFocus += (s, e) => CommitEdit();
+            Controls.Add(editor);
+            editor.BringToFront();
+            editor.Focus();
+            editor.SelectionStart = editor.Text.Length;
+            Invalidate();
+        }
+
+        public void CommitEdit()
+        {
+            if (editor == null) return;
+            var ed = editor; editor = null;
+            string text = ed.Text.Replace("\r\n", "\n").Replace("\r", "\n");
+            Controls.Remove(ed); ed.Dispose();
+            SetCellText(edR, edC, text);
+        }
+
+        void CancelEdit()
+        {
+            if (editor == null) return;
+            var ed = editor; editor = null;
+            Controls.Remove(ed); ed.Dispose();
+        }
+
+        void SetCellText(int r, int c, string text)
+        {
+            var cell = Sheet.Get(r, c);
+            string old = cell == null ? "" : cell.Text ?? "";
+            if (old == text) return;
+            if (cell == null) { cell = new Cell(); Sheet.Cells[Sheet.Key(r, c)] = cell; }
+            cell.Text = text;
+            double d;
+            cell.IsNum = double.TryParse(text.Replace(",", ""), NumberStyles.Float, CultureInfo.InvariantCulture, out d);
+            cell.IsBool = false;
+            Sheet.EditCells[Sheet.Key(r, c)] = text;
+            Render.Layout(Sheet);
+            UpdateBars();
+            Invalidate();
+            RaiseEdited();
+        }
+
+        public void ClearSelectionText()
+        {
+            if (!HasSelection) return;
+            int r1, c1, r2, c2; GetSel(out r1, out c1, out r2, out c2);
+            for (int r = r1; r <= r2; r++)
+                for (int c = c1; c <= c2; c++)
+                {
+                    var cell = Sheet.Get(r, c);
+                    if (cell != null && !string.IsNullOrEmpty(cell.Text)) { cell.Text = ""; Sheet.EditCells[Sheet.Key(r, c)] = ""; }
+                }
+            Render.Layout(Sheet); UpdateBars(); Invalidate(); RaiseEdited();
+        }
 
         protected override void OnMouseWheel(MouseEventArgs e)
         {
@@ -1247,7 +1427,7 @@ namespace ExcelViewer
         protected override bool IsInputKey(Keys k)
         {
             var kc = k & Keys.KeyCode;
-            if (kc == Keys.Up || kc == Keys.Down || kc == Keys.Left || kc == Keys.Right) return true;
+            if (kc == Keys.Up || kc == Keys.Down || kc == Keys.Left || kc == Keys.Right || kc == Keys.Enter) return true;
             return base.IsInputKey(k);
         }
 
@@ -1265,6 +1445,9 @@ namespace ExcelViewer
                 case Keys.PageDown: SetVal(vs, vs.Value + ViewH); return;
                 case Keys.PageUp: SetVal(vs, vs.Value - ViewH); return;
                 case Keys.Home: if (e.Control) { SetVal(vs, 0); SetVal(hs, 0); } return;
+                case Keys.F2:
+                case Keys.Enter: if (editMode && HasSelection) { BeginEdit(Math.Min(ar, cr), Math.Min(ac, cc)); e.Handled = true; } return;
+                case Keys.Delete: if (editMode) ClearSelectionText(); return;
                 default: return;
             }
             if (!HasSelection) { SelectCell(0, 0); return; }
@@ -1391,6 +1574,227 @@ namespace ExcelViewer
                 Render.Draw(g, Sheet, r1, r2, c1, c2, 1 - Sheet.X[c1] * z, 1 - Sheet.Y[r1] * z, z, false);
             }
             return bmp;
+        }
+    }
+
+    // ───────────────────────── 수정 내용 저장 ─────────────────────────
+    static class Saver
+    {
+        const string NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+        public static void Save(string path, List<Sheet> sheets)
+        {
+            string ext = Path.GetExtension(path).ToLowerInvariant();
+            if (ext == ".csv" || ext == ".tsv") { SaveCsv(path, sheets[0], ext == ".tsv" ? '\t' : ','); return; }
+            string tmp = path + ".saving";
+            File.Copy(path, tmp, true);
+            try
+            {
+                bool cellsEdited = false;
+                using (var fs = new FileStream(tmp, FileMode.Open, FileAccess.ReadWrite))
+                using (var zip = new ZipArchive(fs, ZipArchiveMode.Update))
+                {
+                    foreach (var sh in sheets)
+                    {
+                        if (!sh.Dirty || sh.EntryName == null) continue;
+                        if (sh.EditCells.Count > 0) cellsEdited = true;
+                        var entry = zip.GetEntry(sh.EntryName);
+                        if (entry == null) continue;
+                        var doc = new XmlDocument();
+                        doc.PreserveWhitespace = true;
+                        using (var st = entry.Open()) doc.Load(st);
+                        Apply(doc, sh);
+                        entry.Delete();
+                        var ne = zip.CreateEntry(sh.EntryName, CompressionLevel.Optimal);
+                        using (var st = ne.Open())
+                        using (var xw = XmlWriter.Create(st, new XmlWriterSettings { Encoding = new UTF8Encoding(false) })) doc.Save(xw);
+                    }
+                    if (cellsEdited) RemoveCalcChain(zip);
+                }
+                File.Copy(tmp, path, true);
+            }
+            finally { try { File.Delete(tmp); } catch { } }
+        }
+
+        static void SaveCsv(string path, Sheet sh, char sep)
+        {
+            int maxR = -1, maxC = -1;
+            foreach (var k in sh.Cells.Keys) { if (!string.IsNullOrEmpty(sh.Cells[k].Text)) { maxR = Math.Max(maxR, (int)(k >> 16)); maxC = Math.Max(maxC, (int)(k & 0xFFFF)); } }
+            var sb = new StringBuilder();
+            for (int r = 0; r <= maxR; r++)
+            {
+                for (int c = 0; c <= maxC; c++)
+                {
+                    if (c > 0) sb.Append(sep);
+                    var cell = sh.Get(r, c);
+                    string v = cell == null ? "" : cell.Text ?? "";
+                    if (v.IndexOf(sep) >= 0 || v.Contains("\n") || v.Contains("\"")) v = "\"" + v.Replace("\"", "\"\"") + "\"";
+                    sb.Append(v);
+                }
+                sb.Append("\r\n");
+            }
+            File.WriteAllText(path, sb.ToString(), new UTF8Encoding(true));
+        }
+
+        static void RemoveCalcChain(ZipArchive zip)
+        {
+            var cc = zip.GetEntry("xl/calcChain.xml");
+            if (cc == null) return;
+            cc.Delete();
+            foreach (var name in new[] { "[Content_Types].xml", "xl/_rels/workbook.xml.rels" })
+            {
+                var e = zip.GetEntry(name);
+                if (e == null) continue;
+                var doc = new XmlDocument();
+                using (var st = e.Open()) doc.Load(st);
+                var rm = new List<XmlNode>();
+                foreach (XmlNode n in doc.DocumentElement.ChildNodes)
+                {
+                    var el = n as XmlElement;
+                    if (el == null) continue;
+                    string v = el.GetAttribute("PartName") + el.GetAttribute("Target");
+                    if (v.EndsWith("calcChain.xml", StringComparison.OrdinalIgnoreCase)) rm.Add(el);
+                }
+                foreach (var n in rm) doc.DocumentElement.RemoveChild(n);
+                e.Delete();
+                var ne = zip.CreateEntry(name, CompressionLevel.Optimal);
+                using (var st = ne.Open())
+                using (var xw = XmlWriter.Create(st, new XmlWriterSettings { Encoding = new UTF8Encoding(false) })) doc.Save(xw);
+            }
+        }
+
+        static XmlElement Child(XmlElement p, string name)
+        {
+            foreach (XmlNode n in p.ChildNodes) { var e = n as XmlElement; if (e != null && e.LocalName == name) return e; }
+            return null;
+        }
+
+        static string Ref(int r, int c) { return Render.ColName(c) + (r + 1); }
+
+        static int ColOfRef(string r)
+        {
+            int col = 0, i = 0;
+            while (i < r.Length && char.IsLetter(r[i])) { col = col * 26 + (char.ToUpperInvariant(r[i]) - 'A' + 1); i++; }
+            return col - 1;
+        }
+
+        static string Inv(double d) { return d.ToString("0.##", CultureInfo.InvariantCulture); }
+
+        static void Apply(XmlDocument doc, Sheet sh)
+        {
+            var root = doc.DocumentElement;
+            var sheetData = Child(root, "sheetData");
+            if (sheetData == null) return;
+            string ns = root.NamespaceURI;
+
+            // 열 너비
+            if (sh.EditCols.Count > 0)
+            {
+                var cols = Child(root, "cols");
+                if (cols == null) { cols = doc.CreateElement("cols", ns); root.InsertBefore(cols, sheetData); }
+                var list = new List<XmlElement>();
+                foreach (XmlNode n in cols.ChildNodes) { var e = n as XmlElement; if (e != null && e.LocalName == "col") list.Add(e); }
+                foreach (var kv in sh.EditCols)
+                {
+                    int k = kv.Key + 1;
+                    XmlElement target = null;
+                    foreach (var e in list.ToArray())
+                    {
+                        int mn = int.Parse(e.GetAttribute("min")), mx = int.Parse(e.GetAttribute("max"));
+                        if (k < mn || k > mx) continue;
+                        if (mn < k) { var a = (XmlElement)e.Clone(); a.SetAttribute("max", (k - 1).ToString()); list.Add(a); }
+                        if (mx > k) { var b = (XmlElement)e.Clone(); b.SetAttribute("min", (k + 1).ToString()); list.Add(b); }
+                        e.SetAttribute("min", k.ToString()); e.SetAttribute("max", k.ToString());
+                        target = e;
+                        break;
+                    }
+                    if (target == null)
+                    {
+                        target = doc.CreateElement("col", ns);
+                        target.SetAttribute("min", k.ToString()); target.SetAttribute("max", k.ToString());
+                        list.Add(target);
+                    }
+                    double w = Math.Round((kv.Value / sh.Mdw) * 256) / 256.0;
+                    target.SetAttribute("width", w.ToString("0.########", CultureInfo.InvariantCulture));
+                    target.SetAttribute("customWidth", "1");
+                    target.RemoveAttribute("bestFit");
+                    if (kv.Value > 0) target.RemoveAttribute("hidden");
+                }
+                list.Sort((a, b) => int.Parse(a.GetAttribute("min")).CompareTo(int.Parse(b.GetAttribute("min"))));
+                while (cols.HasChildNodes) cols.RemoveChild(cols.FirstChild);
+                foreach (var e in list) cols.AppendChild(e);
+            }
+
+            // 행 찾기/만들기
+            var rows = new SortedDictionary<int, XmlElement>();
+            foreach (XmlNode n in sheetData.ChildNodes)
+            {
+                var e = n as XmlElement;
+                int rn;
+                if (e != null && e.LocalName == "row" && int.TryParse(e.GetAttribute("r"), out rn)) rows[rn - 1] = e;
+            }
+            Func<int, XmlElement> getRow = r =>
+            {
+                XmlElement e;
+                if (rows.TryGetValue(r, out e)) return e;
+                e = doc.CreateElement("row", ns);
+                e.SetAttribute("r", (r + 1).ToString());
+                XmlElement after = null;
+                foreach (var kv in rows) { if (kv.Key > r) { after = kv.Value; break; } }
+                if (after != null) sheetData.InsertBefore(e, after); else sheetData.AppendChild(e);
+                rows[r] = e;
+                return e;
+            };
+
+            foreach (var kv in sh.EditRows)
+            {
+                var row = getRow(kv.Key);
+                row.SetAttribute("ht", Inv(kv.Value * 72.0 / 96.0));
+                row.SetAttribute("customHeight", "1");
+                if (kv.Value > 0) row.RemoveAttribute("hidden");
+            }
+
+            foreach (var kv in sh.EditCells)
+            {
+                int r = (int)(kv.Key >> 16), c = (int)(kv.Key & 0xFFFF);
+                var row = getRow(r);
+                string rf = Ref(r, c);
+                XmlElement cel = null, after = null;
+                foreach (XmlNode n in row.ChildNodes)
+                {
+                    var e = n as XmlElement;
+                    if (e == null || e.LocalName != "c") continue;
+                    string er = e.GetAttribute("r");
+                    if (er == rf) { cel = e; break; }
+                    if (er.Length > 0 && ColOfRef(er) > c) { after = e; break; }
+                }
+                if (cel == null)
+                {
+                    cel = doc.CreateElement("c", ns);
+                    cel.SetAttribute("r", rf);
+                    if (after != null) row.InsertBefore(cel, after); else row.AppendChild(cel);
+                }
+                string ot = cel.GetAttribute("t");
+                bool wasNum = (ot == "" || ot == "n") && Child(cel, "v") != null;
+                foreach (var nm in new[] { "f", "v", "is" }) { var x = Child(cel, nm); while (x != null) { cel.RemoveChild(x); x = Child(cel, nm); } }
+                cel.RemoveAttribute("t");
+                string text = kv.Value ?? "";
+                if (text.Length == 0) continue;
+                double d;
+                if (wasNum && double.TryParse(text.Replace(",", ""), NumberStyles.Float, CultureInfo.InvariantCulture, out d))
+                {
+                    var v = doc.CreateElement("v", ns); v.InnerText = d.ToString("R", CultureInfo.InvariantCulture); cel.AppendChild(v);
+                }
+                else
+                {
+                    cel.SetAttribute("t", "inlineStr");
+                    var isEl = doc.CreateElement("is", ns);
+                    var t = doc.CreateElement("t", ns);
+                    t.SetAttribute("xml:space", "preserve");
+                    t.InnerText = text;
+                    isEl.AppendChild(t); cel.AppendChild(isEl);
+                }
+            }
         }
     }
 
@@ -1553,7 +1957,8 @@ namespace ExcelViewer
         Label status = new Label();
         Label zoomLbl = new Label();
         TextBox search = new TextBox();
-        Button updBtn;
+        Button updBtn, editBtn, saveBtn;
+        int curSheet;
         Panel sidebar = new Panel();
         Panel center = new Panel();
         List<Sheet> sheets = new List<Sheet>();
@@ -1563,7 +1968,7 @@ namespace ExcelViewer
 
         public MainForm(string file)
         {
-            using (var g = CreateGraphics()) dpi = g.DpiX / 96f;
+            dpi = Program.Dpi;
             Text = "엑셀 뷰어";
             Font = new Font("맑은 고딕", 9.5f);
             StartPosition = FormStartPosition.Manual;
@@ -1579,6 +1984,12 @@ namespace ExcelViewer
             flow.Controls.Add(Btn("복사 (Ctrl+C)", (s, e) => CopySel(false)));
             flow.Controls.Add(Btn("그림으로 복사", (s, e) => CopySel(true)));
             flow.Controls.Add(Btn("전체 선택", (s, e) => view.SelectAll()));
+            flow.Controls.Add(Sep());
+            editBtn = Btn("내용 수정", (s, e) => ToggleEdit());
+            flow.Controls.Add(editBtn);
+            saveBtn = Btn("저장 (Ctrl+S)", (s, e) => SaveEdits());
+            saveBtn.Visible = false; saveBtn.Enabled = false;
+            flow.Controls.Add(saveBtn);
             flow.Controls.Add(Sep());
             flow.Controls.Add(new Label { Text = "찾기", AutoSize = true, Margin = new Padding(4, 8, 4, 0) });
             search.Width = (int)(150 * dpi); search.Margin = new Padding(0, 5, 4, 0);
@@ -1621,6 +2032,7 @@ namespace ExcelViewer
             view.Dock = DockStyle.Fill;
             view.Visible = false;
             view.SelectionChanged += (s, e) => UpdateStatus();
+            view.Edited += (s, e) => { saveBtn.Enabled = true; if (!Text.StartsWith("* ")) Text = "* " + Text; };
             view.ZoomChanged += (s, e) => { zoomLbl.Text = (int)Math.Round(view.Zoom * 100) + "%"; };
             view.SetZoom(store.GetInt("zoom", 100) / 100f);
             zoomLbl.Text = (int)Math.Round(view.Zoom * 100) + "%";
@@ -1652,7 +2064,7 @@ namespace ExcelViewer
 
             EnableDrop(this);
             KeyDown += OnKeys;
-            FormClosing += (s, e) => SaveState();
+            FormClosing += (s, e) => { if (!ConfirmDiscard()) { e.Cancel = true; return; } SaveState(); };
 
             // 창 위치/크기 복원
             var bounds = new Rectangle(store.GetInt("x", -1), store.GetInt("y", -1), store.GetInt("w", (int)(1150 * dpi)), store.GetInt("h", (int)(760 * dpi)));
@@ -1714,8 +2126,11 @@ namespace ExcelViewer
 
         void OnKeys(object s, KeyEventArgs e)
         {
-            if (e.Control && e.KeyCode == Keys.C && !search.Focused) { CopySel(e.Shift); e.SuppressKeyPress = true; }
-            else if (e.Control && e.KeyCode == Keys.A && !search.Focused) { view.SelectAll(); e.SuppressKeyPress = true; }
+            bool typing = search.Focused || view.IsEditing;
+            if (e.Control && e.KeyCode == Keys.S) { if (view.EditMode) SaveEdits(); e.SuppressKeyPress = true; }
+            else if (typing) return;
+            else if (e.Control && e.KeyCode == Keys.C) { CopySel(e.Shift); e.SuppressKeyPress = true; }
+            else if (e.Control && e.KeyCode == Keys.A) { view.SelectAll(); e.SuppressKeyPress = true; }
             else if (e.Control && e.KeyCode == Keys.F) { search.Focus(); search.SelectAll(); e.SuppressKeyPress = true; }
             else if (e.Control && e.KeyCode == Keys.O) { AddDialog(); e.SuppressKeyPress = true; }
             else if (e.KeyCode == Keys.F3) { FindNext(); e.SuppressKeyPress = true; }
@@ -1896,6 +2311,8 @@ namespace ExcelViewer
         // ── 파일 보기 ──
         void CloseFile()
         {
+            foreach (var s in sheets) { s.EditCells.Clear(); s.EditCols.Clear(); s.EditRows.Clear(); }
+            if (view.EditMode) ToggleEdit();
             openPath = null;
             sheets = new List<Sheet>();
             view.SetSheet(null);
@@ -1905,8 +2322,84 @@ namespace ExcelViewer
             UpdateStatus();
         }
 
-        void OpenFile(string path)
+        bool AnyDirty()
         {
+            view.CommitEdit();
+            foreach (var s in sheets) if (s.Dirty) return true;
+            return false;
+        }
+
+        bool ConfirmDiscard()
+        {
+            if (!AnyDirty()) return true;
+            var a = MessageBox.Show(this, "수정한 내용을 저장할까요?\n\n[예] 저장   [아니요] 저장 안 함", "엑셀 뷰어", MessageBoxButtons.YesNoCancel);
+            if (a == DialogResult.Cancel) return false;
+            if (a == DialogResult.Yes) return SaveEdits();
+            foreach (var s in sheets) { s.EditCells.Clear(); s.EditCols.Clear(); s.EditRows.Clear(); }
+            return true;
+        }
+
+        void ToggleEdit()
+        {
+            if (view.Sheet == null) { Flash("먼저 보관함에서 파일을 열어주세요."); return; }
+            if (!view.EditMode)
+            {
+                view.EditMode = true;
+                editBtn.Text = "수정 끝내기";
+                editBtn.BackColor = Color.FromArgb(255, 236, 179);
+                saveBtn.Visible = true;
+                UpdateStatus();
+                return;
+            }
+            bool dirty = AnyDirty();
+            if (dirty)
+            {
+                if (!ConfirmDiscard()) return;
+                if (openPath != null && sheets.Count > 0 && sheets[0].Dirty == false) { }
+            }
+            view.EditMode = false;
+            editBtn.Text = "내용 수정";
+            editBtn.BackColor = SystemColors.Control;
+            editBtn.UseVisualStyleBackColor = true;
+            saveBtn.Visible = false;
+            if (dirty && openPath != null) ReloadKeep();
+            UpdateStatus();
+        }
+
+        void ReloadKeep()
+        {
+            int idx = curSheet;
+            OpenFile(openPath, true);
+            ShowSheet(Math.Min(idx, sheets.Count - 1));
+        }
+
+        bool SaveEdits()
+        {
+            if (openPath == null) return true;
+            if (!AnyDirty()) { Flash("바뀐 내용이 없어요."); return true; }
+            try
+            {
+                Cursor = Cursors.WaitCursor;
+                Saver.Save(openPath, sheets);
+                foreach (var s in sheets) { s.EditCells.Clear(); s.EditCols.Clear(); s.EditRows.Clear(); }
+                ReloadKeep();
+                saveBtn.Enabled = false;
+                Flash("저장했어요.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "저장하지 못했어요.\n" + ex.Message + "\n\n(엑셀에서 이 파일이 열려 있으면 닫고 다시 해보세요.)", "엑셀 뷰어");
+                return false;
+            }
+            finally { Cursor = Cursors.Default; }
+        }
+
+        void OpenFile(string path) { OpenFile(path, false); }
+
+        void OpenFile(string path, bool reload)
+        {
+            if (!reload && !ConfirmDiscard()) return;
             Cursor = Cursors.WaitCursor;
             try
             {
@@ -1919,6 +2412,7 @@ namespace ExcelViewer
                 Text = Path.GetFileName(path) + " - 엑셀 뷰어";
                 BuildTabs();
                 home.Visible = false; view.Visible = true; sheetTabs.Visible = true;
+                saveBtn.Enabled = false;
                 ShowSheet(0);
                 HighlightOpen();
                 view.Focus();
@@ -1953,6 +2447,8 @@ namespace ExcelViewer
         void ShowSheet(int i)
         {
             if (i < 0 || i >= sheets.Count) return;
+            view.CommitEdit();
+            curSheet = i;
             view.SetSheet(sheets[i]);
             for (int k = 0; k < sheetTabs.Controls.Count; k++)
             {
@@ -1969,6 +2465,7 @@ namespace ExcelViewer
         void UpdateStatus()
         {
             if (view.Sheet == null) { status.Text = "파일을 끌어다 놓으면 보관함에 저장돼요.  보관함 버튼을 오른쪽 클릭하면 이름 바꾸기·삭제를 할 수 있어요."; return; }
+            if (view.EditMode) { status.Text = "수정 모드 · 칸 더블클릭(또는 Enter)으로 글자 수정, Alt+Enter 줄바꿈 · 위/왼쪽 머리글 경계선을 끌어 칸 크기 조절 · Delete 지우기 · Ctrl+S 저장"; return; }
             if (!view.HasSelection) { status.Text = "마우스로 칸을 드래그해서 고른 뒤 Ctrl+C → 다른 곳에 붙여넣기.  (Ctrl+A 전체 선택, Ctrl+휠 확대)"; return; }
             int r1, c1, r2, c2; view.GetSel(out r1, out c1, out r2, out c2);
             string a = Render.ColName(c1) + (r1 + 1), b = Render.ColName(c2) + (r2 + 1);
@@ -2087,6 +2584,19 @@ namespace ExcelViewer
     static class Program
     {
         [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+        static float dpi = -1;
+        public static float Dpi
+        {
+            get
+            {
+                if (dpi < 0)
+                {
+                    dpi = 1f;
+                    try { using (var g = Graphics.FromHwnd(IntPtr.Zero)) dpi = Math.Max(1f, g.DpiX / 96f); } catch { }
+                }
+                return dpi;
+            }
+        }
 
         [STAThread]
         static void Main(string[] args)
